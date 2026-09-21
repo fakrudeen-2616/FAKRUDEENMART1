@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FAKRUDEEN MART</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header id="topbar">
+  <div class="brand" id="brandBtn">FAKRUDEEN <span>MART</span></div>
+  <input id="searchBox" type="search" placeholder="Search products..." hidden>
+  <nav id="nav"></nav>
+</header>
+
+<main id="app"></main>
+
+<!-- Help & Support chatbot -->
+<button id="chatFab" title="Help & Support">💬</button>
+<section id="chatBox" hidden>
+  <div class="chat-head">Help &amp; Support <button id="chatClose">✕</button></div>
+  <div id="chatLog"></div>
+  <div class="chat-input">
+    <input id="chatText" placeholder="Type: track, return, payment, pin code...">
+    <button id="chatSend">Send</button>
+  </div>
+</section>
+
+<div id="toast" hidden></div>
+
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
