@@ -1,5 +1,6 @@
-/* FAKRUDEEN MART - demo front-end app (data is kept in the browser's localStorage).
-   NOTE: a demo only. Real sites must hash passwords and use a server + database. */
+/* FAKRUDEEN MART - front-end app.
+   Users, products and orders now come from the Spring Boot + H2 backend.
+   Only the session (who is logged in) and the pre-checkout cart stay in the browser. */
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -7,26 +8,34 @@ const inr = n => '₹' + Number(n).toLocaleString('en-IN');
 const load = (k, d) => { try { const v = JSON.parse(localStorage.getItem(k)); return v ?? d; } catch { return d; } };
 const save = (k, v) => localStorage.setItem(k, JSON.stringify(v));
 
+// ---- change this to your Render backend URL if it ever changes ----
+const API = 'https://fakrudeen-mart-backend-1.onrender.com/api';
+
+async function api(path, opts = {}) {
+  const res = await fetch(API + path, {
+    headers: { 'Content-Type': 'application/json' },
+    ...opts
+  });
+  if (!res.ok) {
+    let msg = 'Request failed';
+    try { msg = (await res.json()).error || msg; } catch {}
+    throw new Error(msg);
+  }
+  if (res.status === 204) return null;
+  const text = await res.text();
+  return text ? JSON.parse(text) : null;
+}
+
 const STEPS = ['Order Placed', 'Packed', 'Shipped', 'Out for Delivery', 'Delivered'];
 const imgUrl = p => `https://loremflickr.com/400/400/${p.kw}?lock=${p.id}`;   // change here for your own photos
 const fallback = 'data:image/svg+xml;utf8,' + encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400"><rect width="400" height="400" fill="#1c1c3a"/><text x="200" y="215" font-size="28" fill="#d4af37" text-anchor="middle" font-family="Arial">FAKRUDEEN MART</text></svg>');
 
-/* ---------- database ---------- */
-function seed() {
-  return {
-    users: [
-      { id: 'admin',    email: 'admin@fakrudeenmart.com',    pass: 'admin123',    role: 'admin',    name: 'Store Admin' },
-      { id: 'seller',   email: 'seller@fakrudeenmart.com',   pass: 'seller123',   role: 'seller',   name: 'Main Seller' },
-      { id: 'customer', email: 'customer@fakrudeenmart.com', pass: 'customer123', role: 'customer', name: 'Demo Customer' }
-    ],
-    products: RAW_PRODUCTS.map((r, i) => ({ id: i + 1, cat: r[0], name: r[1], price: r[2], kw: r[3], seller: 'seller' })),
-    orders: []
-  };
-}
-let db = load('fm_db', null);
-if (!db) { db = seed(); save('fm_db', db); }
-const persist = () => save('fm_db', db);
+/* ---------- data cache (loaded from the backend) ---------- */
+let db = { users: [], products: [], orders: [] };
+async function loadProducts() { db.products = await api('/products'); }
+async function loadOrders()   { db.orders   = await api('/orders'); }
+async function loadUsers()    { db.users    = await api('/users'); }
 
 let session = load('fm_session', null);           // {id, role, name}
 let ui = { view: 'home', cat: 'all', sort: '', q: '', tab: 'login', err: '', sellerTab: 'orders', adminTab: 'dash' };
@@ -58,16 +67,32 @@ function nav() {
 const statusBadge = o => o.cancelled ? '<span class="badge c">Cancelled</span>' : `<span class="badge">${STEPS[o.status]}</span>`;
 
 /* ---------- views ---------- */
-function render() {
+async function render() {
   nav();
   const app = $('#app');
-  if (!session) return app.innerHTML = authView(), bindAuth();
-  if (session.role === 'admin') return app.innerHTML = adminView(), bindAdmin();
-  if (session.role === 'seller') return app.innerHTML = sellerView(), bindSeller();
-  if (ui.view === 'cart') return app.innerHTML = cartView(), bindCart();
-  if (ui.view === 'checkout') return app.innerHTML = checkoutView(), bindCheckout();
-  if (ui.view === 'orders') return app.innerHTML = ordersView(), bindOrders();
-  app.innerHTML = shopView(); bindShop();
+  if (!session) { app.innerHTML = authView(); bindAuth(); return; }
+  try {
+    if (session.role === 'admin') {
+      if (ui.adminTab === 'products') await loadProducts();
+      else if (ui.adminTab === 'orders') await loadOrders();
+      else if (ui.adminTab === 'users') await loadUsers();
+      else await Promise.all([loadOrders(), loadProducts(), loadUsers()]);
+      app.innerHTML = adminView(); bindAdmin(); return;
+    }
+    if (session.role === 'seller') {
+      await Promise.all([loadOrders(), loadProducts()]);
+      app.innerHTML = sellerView(); bindSeller(); return;
+    }
+    if (ui.view === 'cart') { if (!db.products.length) await loadProducts(); app.innerHTML = cartView(); bindCart(); return; }
+    if (ui.view === 'checkout') { app.innerHTML = checkoutView(); bindCheckout(); return; }
+    if (ui.view === 'orders') { await loadOrders(); app.innerHTML = ordersView(); bindOrders(); return; }
+    await loadProducts();
+    app.innerHTML = shopView(); bindShop();
+  } catch (e) {
+    app.innerHTML = `<div class="wrap"><div class="card err">Cannot reach the server. ${esc(e.message)}<br><br>
+      <button class="btn" id="retryBtn">Retry</button></div></div>`;
+    const rb = $('#retryBtn'); if (rb) rb.onclick = render;
+  }
 }
 
 /* --- auth --- */
@@ -99,25 +124,28 @@ function bindAuth() {
   document.querySelectorAll('[data-t]').forEach(b => b.onclick = () => { ui.tab = b.dataset.t; ui.err = ''; render(); });
   const lb = $('#loginBtn');
   if (lb) {
-    const go = () => {
-      const id = $('#lId').value.trim().toLowerCase(), pw = $('#lPass').value.trim();
+    const go = async () => {
+      const id = $('#lId').value.trim(), pw = $('#lPass').value.trim();
       ui.lastId = $('#lId').value.trim();
-      const u = db.users.find(u => (u.id.toLowerCase() === id || u.email.toLowerCase() === id) && u.pass === pw);
-      if (!u) { ui.err = 'Wrong user ID / email or password'; return render(); }
-      session = { id: u.id, role: u.role, name: u.name }; save('fm_session', session);
-      ui.err = ''; ui.view = 'home'; render();
+      if (!id || !pw) { ui.err = 'Enter your user ID / email and password'; return render(); }
+      try {
+        const user = await api('/auth/login', { method: 'POST', body: JSON.stringify({ loginId: id, password: pw }) });
+        session = user; save('fm_session', session);
+        ui.err = ''; ui.view = 'home'; render();
+      } catch (e) { ui.err = e.message; render(); }
     };
     $('#showPw').onclick = () => { const p = $('#lPass'), show = p.type === 'password'; p.type = show ? 'text' : 'password'; $('#showPw').textContent = show ? 'Hide password' : 'Show password'; };
     lb.onclick = go; $('#lPass').onkeydown = e => { if (e.key === 'Enter') go(); };
   }
   const rb = $('#regBtn');
-  if (rb) rb.onclick = () => {
+  if (rb) rb.onclick = async () => {
     const name = $('#rName').value.trim(), id = $('#rId').value.trim(), email = $('#rEmail').value.trim(), pass = $('#rPass').value, role = $('#rRole').value;
     if (!name || !id || !email || pass.length < 6) { ui.err = 'Fill all fields (password min 6 chars)'; return render(); }
     if (!/^\S+@\S+\.\S+$/.test(email)) { ui.err = 'Enter a valid email'; return render(); }
-    if (db.users.some(u => u.id.toLowerCase() === id.toLowerCase() || u.email.toLowerCase() === email.toLowerCase())) { ui.err = 'User ID or email already exists'; return render(); }
-    db.users.push({ id, email, pass, role, name }); persist();
-    ui.tab = 'login'; ui.err = ''; render(); toast('Account created — please login');
+    try {
+      await api('/auth/register', { method: 'POST', body: JSON.stringify({ id, name, email, password: pass, role }) });
+      ui.tab = 'login'; ui.err = ''; render(); toast('Account created — please login');
+    } catch (e) { ui.err = e.message; render(); }
   };
 }
 
@@ -156,7 +184,7 @@ function bindShop() {
   });
 }
 
-/* --- customer: cart --- */
+/* --- customer: cart (still local — matches the original demo's behaviour) --- */
 function cartItems() { return getCart().map(i => ({ ...i, p: db.products.find(p => p.id === i.pid) })).filter(i => i.p); }
 function cartView() {
   const items = cartItems(), total = items.reduce((a, i) => a + i.p.price * i.qty, 0);
@@ -195,7 +223,7 @@ function checkoutView() {
 }
 function bindCheckout() {
   $('#backCart').onclick = () => { ui.view = 'cart'; ui.err = ''; render(); };
-  $('#placeBtn').onclick = () => {
+  $('#placeBtn').onclick = async () => {
     const f = { name: $('#aName').value.trim(), phone: $('#aPhone').value.trim(), addr: $('#aAddr').value.trim(), city: $('#aCity').value.trim(), pin: $('#aPin').value.trim(), pay: $('#aPay').value };
     const fail = m => { ui.err = m; const e = document.querySelector('.err') || document.createElement('div'); e.className = 'err'; e.textContent = m; document.querySelector('h2').after(e); };
     if (!f.name || !f.addr || !f.city) return fail('Please fill name, address and city');
@@ -203,11 +231,14 @@ function bindCheckout() {
     if (!/^[1-9]\d{5}$/.test(f.pin)) return fail('Enter a valid 6-digit PIN code');
     const items = cartItems(); if (!items.length) return;
     const order = {
-      id: 'FM' + Date.now().toString().slice(-8), user: session.id, userName: session.name,
+      user: session.id, userName: session.name,
       items: items.map(i => ({ pid: i.pid, name: i.p.name, price: i.p.price, qty: i.qty, seller: i.p.seller, cat: i.p.cat })),
-      total: items.reduce((a, i) => a + i.p.price * i.qty, 0), address: f, status: 0, cancelled: false, date: new Date().toLocaleString('en-IN')
+      total: items.reduce((a, i) => a + i.p.price * i.qty, 0), address: f
     };
-    db.orders.unshift(order); persist(); setCart([]); ui.err = ''; ui.view = 'orders'; render(); toast('Order placed: ' + order.id);
+    try {
+      const saved = await api('/orders', { method: 'POST', body: JSON.stringify(order) });
+      setCart([]); ui.err = ''; ui.view = 'orders'; render(); toast('Order placed: ' + saved.id);
+    } catch (e) { fail(e.message); }
   };
 }
 
@@ -217,7 +248,7 @@ function trackHtml(o) {
   return `<div class="track">${STEPS.map((s, i) => `<div class="step ${i <= o.status ? 'done' : ''}"><div class="dot">${i <= o.status ? '✓' : ''}</div>${s}</div>`).join('')}</div>`;
 }
 function ordersView() {
-  const mine = db.orders.filter(o => o.user === session.id);
+  const mine = db.orders.filter(o => o.user === session.id).slice().reverse();
   return `<div class="wrap"><h2>My Orders &amp; Delivery Tracking</h2>
     ${mine.length ? mine.map(o => `<div class="order"><div class="head"><b>#${o.id}</b><span>${o.date}</span>${statusBadge(o)}<b>${inr(o.total)}</b></div>
       <div style="color:var(--muted);font-size:14px">${o.items.map(i => esc(i.name) + ' × ' + i.qty).join(', ')}</div>
@@ -226,8 +257,9 @@ function ordersView() {
       ${(!o.cancelled && o.status < 2) ? `<button class="btn danger sm" data-cancel="${o.id}">Cancel order</button>` : ''}</div>`).join('') : '<div class="card empty">No orders yet.</div>'}</div>`;
 }
 function bindOrders() {
-  document.querySelectorAll('[data-cancel]').forEach(b => b.onclick = () => {
-    const o = db.orders.find(o => o.id === b.dataset.cancel); o.cancelled = true; persist(); render(); toast('Order cancelled');
+  document.querySelectorAll('[data-cancel]').forEach(b => b.onclick = async () => {
+    try { await api(`/orders/${b.dataset.cancel}/cancel`, { method: 'PUT' }); toast('Order cancelled'); render(); }
+    catch (e) { toast(e.message); }
   });
 }
 
@@ -236,9 +268,10 @@ function statusSelect(o) {
   return `<select data-st="${o.id}" ${o.cancelled ? 'disabled' : ''}>${STEPS.map((s, i) => `<option value="${i}" ${o.status === i ? 'selected' : ''}>${s}</option>`).join('')}</select>`;
 }
 function orderTable(orders, sellerId) {
-  if (!orders.length) return '<div class="card empty">No orders yet.</div>';
+  const list = orders.slice().reverse();
+  if (!list.length) return '<div class="card empty">No orders yet.</div>';
   return `<div class="card tblwrap"><table><tr><th>Order</th><th>Customer</th><th>Items</th><th>Ship to (PIN)</th><th>Total</th><th>Status</th></tr>
-    ${orders.map(o => {
+    ${list.map(o => {
       const its = sellerId ? o.items.filter(i => i.seller === sellerId) : o.items;
       const tot = its.reduce((a, i) => a + i.price * i.qty, 0);
       return `<tr><td>#${o.id}<br><small>${o.date}</small></td><td>${esc(o.userName)}</td><td>${its.map(i => esc(i.name) + ' × ' + i.qty).join('<br>')}</td>
@@ -246,8 +279,9 @@ function orderTable(orders, sellerId) {
     }).join('')}</table></div>`;
 }
 function bindStatus() {
-  document.querySelectorAll('[data-st]').forEach(s => s.onchange = () => {
-    db.orders.find(o => o.id === s.dataset.st).status = +s.value; persist(); toast('Status updated'); render();
+  document.querySelectorAll('[data-st]').forEach(s => s.onchange = async () => {
+    try { await api(`/orders/${s.dataset.st}/status`, { method: 'PUT', body: JSON.stringify({ status: +s.value }) }); toast('Status updated'); render(); }
+    catch (e) { toast(e.message); }
   });
 }
 function sellerView() {
@@ -268,13 +302,18 @@ function sellerView() {
 }
 function bindProductForms() {
   const ap = $('#addProd');
-  if (ap) ap.onclick = () => {
+  if (ap) ap.onclick = async () => {
     const name = $('#pName').value.trim(), price = +$('#pPrice').value, kw = $('#pKw').value.trim().replace(/\s+/g, '') || 'product';
     if (!name || !(price > 0)) return toast('Enter name and price');
-    db.products.push({ id: Math.max(0, ...db.products.map(p => p.id)) + 1, cat: $('#pCat').value, name, price, kw, seller: session.id });
-    persist(); render(); toast('Product added');
+    try {
+      await api('/products', { method: 'POST', body: JSON.stringify({ cat: $('#pCat').value, name, price, kw, seller: session.id }) });
+      render(); toast('Product added');
+    } catch (e) { toast(e.message); }
   };
-  document.querySelectorAll('[data-dp]').forEach(b => b.onclick = () => { db.products = db.products.filter(p => p.id !== +b.dataset.dp); persist(); render(); toast('Product deleted'); });
+  document.querySelectorAll('[data-dp]').forEach(b => b.onclick = async () => {
+    try { await api(`/products/${b.dataset.dp}`, { method: 'DELETE' }); render(); toast('Product deleted'); }
+    catch (e) { toast(e.message); }
+  });
 }
 function bindSeller() {
   document.querySelectorAll('[data-stab]').forEach(b => b.onclick = () => { ui.sellerTab = b.dataset.stab; render(); });
@@ -306,7 +345,10 @@ function adminView() {
 }
 function bindAdmin() {
   document.querySelectorAll('[data-atab]').forEach(b => b.onclick = () => { ui.adminTab = b.dataset.atab; render(); });
-  document.querySelectorAll('[data-du]').forEach(b => b.onclick = () => { db.users = db.users.filter(u => u.id !== b.dataset.du); persist(); render(); toast('User deleted'); });
+  document.querySelectorAll('[data-du]').forEach(b => b.onclick = async () => {
+    try { await api(`/users/${b.dataset.du}`, { method: 'DELETE' }); render(); toast('User deleted'); }
+    catch (e) { toast(e.message); }
+  });
   bindStatus(); bindProductForms();
 }
 
@@ -328,18 +370,22 @@ function say(text, who) {
   const d = document.createElement('div'); d.className = 'msg ' + who; d.textContent = text;
   $('#chatLog').append(d); $('#chatLog').scrollTop = 1e9;
 }
-function botReply(t) {
-  const m = t.match(/FM\d{8}/i);
+async function botReply(t) {
+  const m = t.match(/FM\d{6,}/i);
   if (m) {
-    const o = db.orders.find(o => o.id.toUpperCase() === m[0].toUpperCase());
-    return o ? `Order #${o.id}: ${o.cancelled ? 'Cancelled' : STEPS[o.status]}. Total ${inr(o.total)}, delivering to PIN ${o.address.pin}.` : 'I could not find that order ID. Please check and try again.';
+    try {
+      if (!db.orders.length) await loadOrders();
+      const o = db.orders.find(o => o.id.toUpperCase() === m[0].toUpperCase());
+      return o ? `Order #${o.id}: ${o.cancelled ? 'Cancelled' : STEPS[o.status]}. Total ${inr(o.total)}, delivering to PIN ${o.address.pin}.` : 'I could not find that order ID. Please check and try again.';
+    } catch { return 'Sorry, I could not reach the server to check that order.'; }
   }
   const l = t.toLowerCase(), hit = bot.find(b => b[0].test(l));
   return hit ? hit[1] : 'Sorry, I did not get that. Try: track order, return, payment, delivery, cart or account. For anything else email support@fakrudeenmart.com';
 }
 function send() {
   const i = $('#chatText'), t = i.value.trim(); if (!t) return;
-  say(t, 'me'); i.value = ''; setTimeout(() => say(botReply(t), 'bot'), 350);
+  say(t, 'me'); i.value = '';
+  botReply(t).then(r => setTimeout(() => say(r, 'bot'), 350));
 }
 $('#chatFab').onclick = () => { const b = $('#chatBox'); b.hidden = !b.hidden; if (!b.hidden && !$('#chatLog').children.length) say('Hi! Welcome to FAKRUDEEN MART support. How can I help you?', 'bot'); };
 $('#chatClose').onclick = () => $('#chatBox').hidden = true;
